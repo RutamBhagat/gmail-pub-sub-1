@@ -173,7 +173,6 @@ async function callGmailApi(url, config, retryCount = 0) {
   }
 }
 
-
 app.post("/webhook/gmail", async (req, res) => {
   console.log("\n--- Gmail Webhook Received (Pub/Sub Notification) ---");
   res.status(200).send("OK");
@@ -309,8 +308,8 @@ app.post("/webhook/gmail", async (req, res) => {
                       );
                       // Add to our log array
                       matchedEmailsForLog.push({
-                        id: potentialUuid, // This is your extracted prefix-uuid
-                        labels: fullMessageDetails.labelIds || [], // Ensure labels is always an array
+                        id: `${bodyPrefix}${potentialUuid}`, // <--- CHANGE: Prepend bodyPrefix
+                        labels: fullMessageDetails.labelIds || [],
                       });
                     } else {
                       console.log(
