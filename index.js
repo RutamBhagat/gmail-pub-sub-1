@@ -8,11 +8,13 @@ const axios = require("axios");
 const PORT = process.env.PORT;
 const app = express();
 
-// --- Global variables for tokens and history ---
-// IMPORTANT: In production, store these securely and per-user if managing multiple accounts.
+/**
+ * Global variables for OAuth tokens and email processing state.
+ * In production, store these securely and per-user for multiple accounts.
+ */
 let currentAccessToken = null;
-let currentRefreshToken = null; // To store the refresh token
-let lastProcessedHistoryIdByUser = {}; // { "user@example.com": "historyId" }
+let currentRefreshToken = null;
+let lastProcessedHistoryIdByUser = {};
 
 app.use(
   bodyParser.json({
@@ -34,7 +36,7 @@ passport.use(
     },
     (accessToken, refreshToken, profile, done) => {
       console.log("Access Token: ", accessToken);
-      console.log("Refresh Token: ", refreshToken); // Will be undefined after the first auth unless forced
+      console.log("Refresh Token: ", refreshToken);
       console.log(
         "Profile Email: ",
         profile.emails && profile.emails[0]
@@ -44,7 +46,6 @@ passport.use(
 
       currentAccessToken = accessToken;
       if (refreshToken) {
-        // Only store/update refresh token if a new one is provided
         currentRefreshToken = refreshToken;
         console.log("Stored new Refresh Token.");
       }
@@ -52,8 +53,6 @@ passport.use(
       const userEmail =
         profile.emails && profile.emails[0] && profile.emails[0].value;
       if (userEmail && !lastProcessedHistoryIdByUser[userEmail]) {
-        // Ideally, get the initial historyId from the users.watch() response.
-        // For now, we'll let the first webhook populate it.
         console.log(`Initial authentication for ${userEmail}.`);
       }
       done(null, profile);
@@ -67,12 +66,12 @@ app.get(
     scope: [
       "profile",
       "email",
-      "https://www.googleapis.com/auth/gmail.readonly", // For history.list and messages.get
-      "https://www.googleapis.com/auth/gmail.modify", // If you ever need to modify
-      "https://www.googleapis.com/auth/gmail.labels", // For label info
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/gmail.labels",
     ],
-    accessType: "offline", // Important: Asks for a refresh token
-    prompt: "consent", // Forces consent screen & new refresh token (useful for testing this)
+    accessType: "offline",
+    prompt: "consent",
   })
 );
 
@@ -92,7 +91,10 @@ app.get(
   }
 );
 
-// Helper function to get a new access token using the refresh token
+/**
+ * Refreshes the OAuth access token using the stored refresh token.
+ * Returns the new access token or null if refresh fails.
+ */
 async function refreshAccessToken() {
   if (!currentRefreshToken) {
     console.error("No refresh token available to refresh access token.");
@@ -104,7 +106,6 @@ async function refreshAccessToken() {
       "https://oauth2.googleapis.com/token",
       null,
       {
-        // Body is null, params are used for x-www-form-urlencoded
         params: {
           client_id: process.env.GOOGLE_CLIENT_ID,
           client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -118,8 +119,7 @@ async function refreshAccessToken() {
     );
     currentAccessToken = response.data.access_token;
     console.log("Access token refreshed successfully.");
-    // Google might issue a new refresh token, but often doesn't if the old one is still valid.
-    // If response.data.refresh_token exists, you should update currentRefreshToken.
+
     if (response.data.refresh_token) {
       currentRefreshToken = response.data.refresh_token;
       console.log("Received and updated a new refresh token.");
@@ -130,13 +130,15 @@ async function refreshAccessToken() {
       "Error refreshing access token:",
       error.response ? JSON.stringify(error.response.data) : error.message
     );
-    currentAccessToken = null; // Invalidate on failure
-    currentRefreshToken = null; // If refresh token is bad, clear it too
+    currentAccessToken = null;
+    currentRefreshToken = null;
     return null;
   }
 }
 
-// Wrapper for Gmail API calls with token refresh and retry
+/**
+ * Wrapper for Gmail API calls with automatic token refresh and retry on 401 errors.
+ */
 async function callGmailApi(url, config, retryCount = 0) {
   if (!currentAccessToken) {
     console.log("No current access token, trying to refresh...");
@@ -160,15 +162,15 @@ async function callGmailApi(url, config, retryCount = 0) {
   } catch (error) {
     if (error.response && error.response.status === 401 && retryCount < 1) {
       console.log("Received 401, attempting token refresh and retry...");
-      await refreshAccessToken(); // Attempt to refresh
+      await refreshAccessToken();
       if (currentAccessToken) {
-        return callGmailApi(url, config, retryCount + 1); // Retry once
+        return callGmailApi(url, config, retryCount + 1);
       } else {
         console.error("Failed to refresh token, cannot retry API call.");
-        throw error; // Re-throw original error or a new one
+        throw error;
       }
     } else {
-      throw error; // Re-throw for other errors or if retries exhausted
+      throw error;
     }
   }
 }
@@ -206,7 +208,7 @@ app.post("/webhook/gmail", async (req, res) => {
     `Processing for ${emailAddress}, starting from historyId: ${startHistoryId}`
   );
 
-  const matchedEmailsForLog = []; // <--- Initialize array to store matched email data
+  const matchedEmailsForLog = [];
 
   try {
     const historyListResponse = await callGmailApi(
@@ -263,11 +265,12 @@ app.post("/webhook/gmail", async (req, res) => {
                 }
 
                 console.log(`  Subject: ${subject}`);
-                // console.log(`  Snippet: ${fullMessageDetails.snippet}`); // Optional: keep for debugging
-                // console.log(`  Final Labels: ${fullMessageDetails.labelIds.join(', ')}`); // Optional: keep for debugging
 
                 let plainTextBody = "";
                 if (fullMessageDetails.payload) {
+                  /**
+                   * Recursively searches through email parts to find plain text content.
+                   */
                   function findPlainTextPart(part) {
                     if (
                       part.mimeType === "text/plain" &&
@@ -306,9 +309,8 @@ app.post("/webhook/gmail", async (req, res) => {
                       console.log(
                         `  MATCH IN BODY: Found prefix '${bodyPrefix}' with UUID: ${potentialUuid}`
                       );
-                      // Add to our log array
                       matchedEmailsForLog.push({
-                        id: `${bodyPrefix}${potentialUuid}`, // <--- CHANGE: Prepend bodyPrefix
+                        id: `${bodyPrefix}${potentialUuid}`,
                         labels: fullMessageDetails.labelIds || [],
                       });
                     } else {
@@ -316,14 +318,9 @@ app.post("/webhook/gmail", async (req, res) => {
                         `  INFO IN BODY: Found prefix '${bodyPrefix}', but '${potentialUuid}' doesn't look like a UUID.`
                       );
                     }
-                  } else {
-                    // console.log(`  INFO IN BODY: Prefix '${bodyPrefix}' not found in body.`); // Optional log
                   }
-                } else {
-                  // console.log("  No plain text body found or body data was empty."); // Optional log
                 }
 
-                // Example of logging if it lands in SPAM or TRASH (can be part of your main logic)
                 if (
                   fullMessageDetails.labelIds &&
                   fullMessageDetails.labelIds.includes("SPAM")
@@ -356,7 +353,6 @@ app.post("/webhook/gmail", async (req, res) => {
       console.log("No new history entries found in this batch.");
     }
 
-    // --- Log the structured JSON array if any matches were found ---
     if (matchedEmailsForLog.length > 0) {
       console.log("\n=== Matched Emails (Structured Log) ===");
       console.log(JSON.stringify(matchedEmailsForLog, null, 2));
@@ -366,7 +362,6 @@ app.post("/webhook/gmail", async (req, res) => {
         "\nNo emails matched the prefix-UUID criteria in this batch."
       );
     }
-    // --- End of structured JSON logging ---
 
     if (newHistoryIdToStore) {
       lastProcessedHistoryIdByUser[emailAddress] = newHistoryIdToStore;
