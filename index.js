@@ -51,11 +51,16 @@ app.get(
 
 app.get(
   "/auth/google/callback",
-  passport.authenticate("google", { failureRedirect: "/login" }),
+  passport.authenticate("google", { failureRedirect: "/login", session: false }),
   (req, res) => {
     res.redirect("/");
   }
 );
+
+app.get("/health", (req, res) => {
+  res.status(200).send("ok");
+  console.log("Health check");
+});
 
 app.get("/", (req, res) => {
   console.log("User: ", req.user);
