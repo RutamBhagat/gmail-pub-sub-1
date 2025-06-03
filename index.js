@@ -1,5 +1,4 @@
 require("dotenv").config();
-const crypto = require("crypto"); // For UUID generation (if you were creating test subjects)
 const express = require("express");
 const bodyParser = require("body-parser");
 const passport = require("passport");
@@ -174,11 +173,10 @@ async function callGmailApi(url, config, retryCount = 0) {
   }
 }
 
+
 app.post("/webhook/gmail", async (req, res) => {
   console.log("\n--- Gmail Webhook Received (Pub/Sub Notification) ---");
-  res.status(200).send("OK"); // Acknowledge Pub/Sub immediately
-
-  // console.log("Raw Pub/Sub Body:", JSON.stringify(req.body, null, 2));
+  res.status(200).send("OK");
 
   const { message: pubSubMessage } = req.body;
   if (!pubSubMessage || !pubSubMessage.data) {
@@ -198,7 +196,6 @@ app.post("/webhook/gmail", async (req, res) => {
   }
 
   const { emailAddress, historyId: notifiedHistoryId } = decodedPubSubPayload;
-
   if (!emailAddress) {
     console.error("No emailAddress in Pub/Sub payload.");
     return;
@@ -214,15 +211,13 @@ app.post("/webhook/gmail", async (req, res) => {
     const historyListResponse = await callGmailApi(
       `https://gmail.googleapis.com/gmail/v1/users/${emailAddress}/history`,
       {
-        method: "get", // Axios requires method for config object
+        method: "get",
         params: { startHistoryId, historyTypes: "messageAdded" },
       }
     );
 
     const historyData = historyListResponse.data;
-    // console.log("users.history.list API Response:", JSON.stringify(historyData, null, 2));
-
-    let newHistoryIdToStore = historyData.historyId; // The latest historyId from this batch
+    let newHistoryIdToStore = historyData.historyId;
 
     if (historyData.history) {
       for (const historyItem of historyData.history) {
@@ -233,7 +228,11 @@ app.post("/webhook/gmail", async (req, res) => {
               console.log(
                 `\nFound new message. ID: ${
                   messageSummary.id
-                }, Initial Labels: ${messageSummary.labelIds.join(", ")}`
+                }, Initial Labels from history: ${
+                  messageSummary.labelIds
+                    ? messageSummary.labelIds.join(", ")
+                    : "N/A"
+                }`
               );
 
               try {
@@ -241,7 +240,11 @@ app.post("/webhook/gmail", async (req, res) => {
                   `https://gmail.googleapis.com/gmail/v1/users/${emailAddress}/messages/${messageSummary.id}`,
                   {
                     method: "get",
-                    params: { fields: "id,labelIds,snippet,payload/headers" }, // Get headers for Subject
+                    // UPDATED FIELDS:
+                    params: {
+                      fields:
+                        "id,labelIds,snippet,payload(headers,parts(mimeType,filename,body(data),parts(mimeType,filename,body(data))))",
+                    },
                   }
                 );
                 const fullMessageDetails = messageDetailsResponse.data;
@@ -265,24 +268,70 @@ app.post("/webhook/gmail", async (req, res) => {
                   `  Final Labels: ${fullMessageDetails.labelIds.join(", ")}`
                 );
 
-                // ** YOUR LOGIC IMPLEMENTED **
-                const subjectPrefix = "spam-test-";
-                if (subject.startsWith(subjectPrefix)) {
-                  // Basic check for UUID-like structure after prefix
-                  const potentialUuid = subject.substring(subjectPrefix.length);
-                  const uuidRegex =
-                    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-                  if (uuidRegex.test(potentialUuid)) {
-                    console.log(
-                      `  MATCH: Subject starts with '${subjectPrefix}' and has a UUID: ${potentialUuid}`
+                // --- Find and decode the plain text body ---
+                let plainTextBody = "";
+                if (fullMessageDetails.payload) {
+                  // Recursive function to find the text/plain part
+                  function findPlainTextPart(part) {
+                    if (
+                      part.mimeType === "text/plain" &&
+                      part.body &&
+                      part.body.data
+                    ) {
+                      return Buffer.from(part.body.data, "base64").toString(
+                        "utf-8"
+                      );
+                    }
+                    if (part.parts && part.parts.length > 0) {
+                      for (const subPart of part.parts) {
+                        const foundBody = findPlainTextPart(subPart);
+                        if (foundBody) return foundBody;
+                      }
+                    }
+                    return null; // Return null if no text/plain part with data is found
+                  }
+                  plainTextBody = findPlainTextPart(fullMessageDetails.payload);
+                }
+
+                if (plainTextBody) {
+                  // console.log("  Decoded Plain Text Body (first 500 chars):", plainTextBody.substring(0, 500)); // Log part of it
+
+                  // ** YOUR LOGIC HERE: Check body for prefix-uuid **
+                  const bodyPrefix = "spam-test-"; // Define your prefix
+                  const indexOfPrefix = plainTextBody.indexOf(bodyPrefix);
+
+                  if (indexOfPrefix !== -1) {
+                    // Extract the part after the prefix
+                    const potentialUuidAndRest = plainTextBody.substring(
+                      indexOfPrefix + bodyPrefix.length
                     );
-                    // Add to your DB or further processing here
+                    // A simple way to get what might be the UUID (assuming it's the next word or up to a space/newline)
+                    const potentialUuid =
+                      potentialUuidAndRest.split(/[\s\n,.]+/)[0];
+
+                    const uuidRegex =
+                      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+                    if (uuidRegex.test(potentialUuid)) {
+                      console.log(
+                        `  MATCH IN BODY: Found prefix '${bodyPrefix}' with UUID: ${potentialUuid}`
+                      );
+                      // Add to your DB or further processing here
+                    } else {
+                      console.log(
+                        `  INFO IN BODY: Found prefix '${bodyPrefix}', but '${potentialUuid}' doesn't look like a UUID.`
+                      );
+                    }
                   } else {
                     console.log(
-                      `  INFO: Subject starts with '${subjectPrefix}' but remaining part is not a UUID.`
+                      `  INFO IN BODY: Prefix '${bodyPrefix}' not found in body.`
                     );
                   }
+                } else {
+                  console.log(
+                    "  No plain text body found or body data was empty."
+                  );
                 }
+                // --- End of body processing ---
 
                 if (
                   fullMessageDetails.labelIds &&
@@ -300,7 +349,6 @@ app.post("/webhook/gmail", async (req, res) => {
                     `  ALERT: Message ${messageSummary.id} is in TRASH.`
                   );
                 }
-                // You can add more checks for CATEGORY_PROMOTIONS, CATEGORY_SOCIAL, CATEGORY_UPDATES, etc.
               } catch (msgError) {
                 console.error(
                   `  Error fetching details for message ${messageSummary.id}:`,
@@ -317,7 +365,6 @@ app.post("/webhook/gmail", async (req, res) => {
       console.log("No new history entries found.");
     }
 
-    // Update the last processed history ID for this user
     if (newHistoryIdToStore) {
       lastProcessedHistoryIdByUser[emailAddress] = newHistoryIdToStore;
       console.log(
